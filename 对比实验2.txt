@@ -1,0 +1,112 @@
+import numpy as np
+import pandas as pd
+from collections import Counter
+from scipy.stats import kendalltau
+from scipy.optimize import minimize_scalar
+import warnings
+warnings.filterwarnings('ignore')
+
+
+cols = [
+    "age", "workclass", "fnlwgt", "education", "education_num",
+    "marital_status", "occupation", "relationship", "race", "sex",
+    "capital_gain", "capital_loss", "hours_per_week", "native_country", "income"
+]
+df = pd.read_csv("census.csv", names=cols, skipinitialspace=True, na_values="?")
+feature = "occupation"
+K = 5
+delta = 1e-5
+sens = 1.0
+c_total = len(df)
+
+# 真实Top-K
+data = df[feature].dropna()
+true_counter = Counter(data)
+true_list = sorted(true_counter.items(), key=lambda x:-x[1])
+true_topk_items = [i for i,c in true_list[:K]]
+true_topk_counts = [c for i,c in true_list[:K]]
+
+#评价指标 
+def hit_rate(pred, true):
+    return len(set(pred) & set(true)) / K
+
+def mean_relative_error(noisy_counts, true_counts):
+    return np.mean(np.abs(np.array(noisy_counts)-np.array(true_counts))/(np.array(true_counts)+1e-8))
+
+def kendall_score(pred_items, true_items):
+    rank_pred = {item:i for i,item in enumerate(pred_items)}
+    rank_true = {item:i for i,item in enumerate(true_items)}
+    pred_rank = [rank_pred[i] for i in true_items if i in rank_pred]
+    true_rank = list(range(len(pred_rank)))
+    return kendalltau(pred_rank, true_rank)[0]
+
+# RDP 对齐
+def pure_dp_to_rdp_eps(eps_target, delta):
+    def f(alpha):
+        return eps_target + (np.log(1/delta) + 0.5*alpha*np.log(2*np.pi*alpha)) / (alpha-1)
+    res = minimize_scalar(f, bounds=(2,100), method="bounded")
+    return res.fun
+
+#三类机制（两种模式：对齐 / 未对齐）
+def run_all_methods(eps, align:bool):
+    if align:
+        # RDP 隐私对齐：统一隐私强度
+        eps_eff = pure_dp_to_rdp_eps(eps, delta)
+    else:
+        # 未对齐：直接原始eps（传统不公平对比）
+        eps_eff = eps
+
+    # M1 Laplace
+    scale_lap = sens / eps_eff
+    items = list(true_counter.keys())
+    counts = np.array(list(true_counter.values()))
+    noisy_lap = counts + np.random.laplace(0, scale_lap, len(counts))
+    rank_lap = sorted(zip(items, counts, noisy_lap), key=lambda x:-x[2])
+    lap_items, lap_cnt = [x[0] for x in rank_lap[:K]], [x[1] for x in rank_lap[:K]]
+
+    # M2 Standard Gaussian (approx DP)
+    sigma_gau = np.sqrt(2 * np.log(1.25/delta)) * sens / eps
+    noisy_gau = counts + np.random.normal(0, sigma_gau, len(counts))
+    rank_gau = sorted(zip(items, counts, noisy_gau), key=lambda x:-x[2])
+    gau_items, gau_cnt = [x[0] for x in rank_gau[:K]], [x[1] for x in rank_gau[:K]]
+
+    # M3 Tight Pure DP Gaussian
+    sigma_tight = np.sqrt(2 * (c_total + sens)) / eps_eff
+    noisy_tight = counts + np.random.normal(0, sigma_tight, len(counts))
+    rank_tight = sorted(zip(items, counts, noisy_tight), key=lambda x:-x[2])
+    tight_items, tight_cnt = [x[0] for x in rank_tight[:K]], [x[1] for x in rank_tight[:K]]
+
+    # 指标打包
+    def get_metric(pred_items, pred_cnt):
+        h = hit_rate(pred_items, true_topk_items)
+        m = mean_relative_error(pred_cnt, true_topk_counts)
+        k = kendall_score(pred_items, true_topk_items)
+        return h, k, m
+
+    return get_metric(lap_items, lap_cnt), \
+           get_metric(gau_items, gau_cnt), \
+           get_metric(tight_items, tight_cnt)
+
+# 实验运行
+eps_list = [0.1, 0.5, 1.0, 2.0, 5.0]
+
+print("="*100)
+print("实验2：隐私对齐 VS 未对齐 消融对比实验")
+print("="*100)
+
+for eps in eps_list:
+    print(f"\n>>> 原始隐私预算 ε = {eps}")
+
+    # 未对齐组
+    (h1,k1,m1), (h2,k2,m2), (h3,k3,m3) = run_all_methods(eps, align=False)
+    print(f"【未对齐（传统不公平对比）】")
+    print(f"Laplace:     Hit={h1:.2f} Tau={k1:.3f} MRE={m1:.3f}")
+    print(f"StandardGau: Hit={h2:.2f} Tau={k2:.3f} MRE={m2:.3f}")
+    print(f"TightPureDP: Hit={h3:.2f} Tau={k3:.3f} MRE={m3:.3f}")
+
+    # 对齐组
+    (h1,k1,m1), (h2,k2,m2), (h3,k3,m3) = run_all_methods(eps, align=True)
+    print(f"【对齐（本文公平对比）】")
+    print(f"Laplace:     Hit={h1:.2f} Tau={k1:.3f} MRE={m1:.3f}")
+    print(f"StandardGau: Hit={h2:.2f} Tau={k2:.3f} MRE={m2:.3f}")
+    print(f"TightPureDP: Hit={h3:.2f} Tau={k3:.3f} MRE={m3:.3f}")
