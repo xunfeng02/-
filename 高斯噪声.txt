@@ -1,0 +1,86 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from collections import Counter
+
+# Census 数据集列名 
+cols = [
+    "age", "workclass", "fnlwgt", "education", "education_num",
+    "marital_status", "occupation", "relationship", "race", "sex",
+    "capital_gain", "capital_loss", "hours_per_week", "native_country", "income"
+]
+
+# 读取数据
+df = pd.read_csv(
+    r"D:\py\PythonProject\census.csv",
+    names=cols,
+    skipinitialspace=True,
+    na_values="?"
+)
+
+
+class ReverseDPTopK:
+    def __init__(self, epsilon=1.0, delta=1e-5):
+        self.epsilon = epsilon
+        self.delta = delta  # 高斯噪声必须参数
+
+    # 高斯噪声（差分隐私标准公式）
+    def gaussian_noise(self, sens=1.0):
+        sigma = np.sqrt(2 * np.log(1.25 / self.delta)) * sens / self.epsilon
+        return np.random.normal(loc=0, scale=sigma)
+
+    def run_with_noisy_scores(self, item_counts: Counter, k=5):
+        items = list(item_counts.keys())
+        counts = list(item_counts.values())
+
+        sorted_counts = sorted(counts, reverse=True)
+        tau = sorted_counts[k-1] if len(counts) >= k else sorted_counts[-1]
+
+        noisy_scores = []
+        noises = []
+        for c in counts:
+            noise = self.gaussian_noise()
+            noisy_score = c + noise
+            noises.append(noise)
+            noisy_scores.append(noisy_score)
+
+        combined = list(zip(items, counts, noisy_scores))
+        combined_sorted = sorted(combined, key=lambda x: x[2], reverse=True)
+        topk_result = combined_sorted[:k]
+
+        return topk_result, noises, noisy_scores
+
+#运行
+if __name__ == "__main__":
+    feature = "education"
+    k = 5
+    epsilon = 1.0
+    delta = 1e-5
+
+    data_series = df[feature].dropna()
+    count_result = Counter(data_series)
+
+    model = ReverseDPTopK(epsilon=epsilon, delta=delta)
+    topk_result, all_noises, all_noisy_scores = model.run_with_noisy_scores(count_result, k=k)
+
+    # 输出结果
+    print("=" * 70)
+    print(f" Gaussian DP Top-{k}（含噪声分数）| 特征：{feature}")
+    print(f"ε = {epsilon}, δ = {delta}")
+    print("=" * 70)
+    print(f"{'类别':<20} {'真实计数':<10} {'噪声分数(noisy score)':<20}")
+    print("-" * 70)
+    for item, true_cnt, noisy_cnt in topk_result:
+        print(f"{item:<20} {true_cnt:<10} {noisy_cnt:<20.2f}")
+
+       num_samples = 10000
+    sigma = np.sqrt(2 * np.log(1.25 / delta)) * 1.0 / epsilon
+    standard_noises = np.random.normal(loc=0, scale=sigma, size=num_samples)
+
+    plt.figure(figsize=(10,5))
+    plt.hist(standard_noises, bins=25, alpha=0.7, color='darkblue', edgecolor='black', density=True)
+    plt.title(f"Gaussian Noise Distribution | ε = {epsilon}", fontsize=14)
+    plt.xlabel("Noise Value", fontsize=12)
+    plt.ylabel("Probability Density", fontsize=12)
+    plt.grid(alpha=0.3)
+    plt.show()
